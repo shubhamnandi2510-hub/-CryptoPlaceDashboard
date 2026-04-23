@@ -4,3 +4,4 @@ numpy
 matplotlib
 seaborn
 requests
+streamlit_autorefresh
