@@ -11,7 +11,7 @@ import matplotlib.dates as mdates
 import seaborn as sns
 import streamlit as st
 from datetime import datetime
-from streamlit_autorefresh import st_autorefresh
+import time
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -19,9 +19,6 @@ st.set_page_config(
     page_icon="💰",
     layout="wide",
 )
-
-# ─── Auto Refresh (non-blocking) ─────────────────────────────────────────────
-st_autorefresh(interval=60000, key="auto_refresh")  # refresh every 60 sec
 
 # ─── Currency symbols ────────────────────────────────────────────────────────
 CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "INR": "₹"}
@@ -91,7 +88,8 @@ sym = CURRENCY_SYMBOLS[currency]
 
 search_query = st.sidebar.text_input("Search coin")
 
-if st.sidebar.button("🔄 Refresh Now"):
+refresh_clicked = st.sidebar.button("🔄 Refresh Now")
+if refresh_clicked:
     st.cache_data.clear()
     st.rerun()
 
@@ -230,3 +228,15 @@ if not df_hist.empty:
 
 else:
     st.warning("Chart data not available")
+
+# ─── Simple Auto Refresh (safe fallback) ─────────────────────────────────────
+
+st.markdown("---")
+placeholder = st.empty()
+
+for i in range(60, 0, -1):
+    placeholder.info(f"🔄 Refreshing in {i} sec...")
+    time.sleep(1)
+
+st.cache_data.clear()
+st.rerun()
