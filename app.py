@@ -3,7 +3,6 @@ Crypto Place Dashboard
 Live cryptocurrency dashboard powered by CoinGecko public API.
 """
 
-import time
 import requests
 import numpy as np
 import pandas as pd
@@ -12,6 +11,7 @@ import matplotlib.dates as mdates
 import seaborn as sns
 import streamlit as st
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 # ─── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -20,14 +20,16 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─── Auto Refresh (non-blocking) ─────────────────────────────────────────────
+st_autorefresh(interval=60000, key="auto_refresh")  # refresh every 60 sec
+
 # ─── Currency symbols ────────────────────────────────────────────────────────
 CURRENCY_SYMBOLS = {"USD": "$", "EUR": "€", "INR": "₹"}
 
-# ─── CoinGecko API helpers ───────────────────────────────────────────────────
+# ─── API helpers ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=60)
 def fetch_top_coins(currency: str) -> pd.DataFrame:
-    """Fetch top 10 coins by market cap from CoinGecko."""
     url = (
         "https://api.coingecko.com/api/v3/coins/markets"
         f"?vs_currency={currency.lower()}&order=market_cap_desc"
@@ -38,7 +40,7 @@ def fetch_top_coins(currency: str) -> pd.DataFrame:
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.RequestException as exc:
-        st.error(f"Failed to fetch coin data: {exc}")
+        st.error(f"API Error: {exc}")
         return pd.DataFrame()
 
     rows = []
@@ -48,16 +50,16 @@ def fetch_top_coins(currency: str) -> pd.DataFrame:
             "Coin Name": item.get("name", ""),
             "Symbol": item.get("symbol", "").upper(),
             "id": item.get("id", ""),
-            "current_price": item.get("current_price", 0),
-            "price_change_24h": item.get("price_change_percentage_24h", 0),
-            "market_cap": item.get("market_cap", 0),
+            "current_price": item.get("current_price") or 0,
+            "price_change_24h": item.get("price_change_percentage_24h") or 0,
+            "market_cap": item.get("market_cap") or 0,
         })
+
     return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=60)
 def fetch_price_history(coin_id: str, currency: str) -> pd.DataFrame:
-    """Fetch 10-day daily price history for a single coin."""
     url = (
         f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
         f"?vs_currency={currency.lower()}&days=10&interval=daily"
@@ -67,14 +69,17 @@ def fetch_price_history(coin_id: str, currency: str) -> pd.DataFrame:
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.RequestException as exc:
-        st.error(f"Failed to fetch price history: {exc}")
+        st.error(f"History Error: {exc}")
         return pd.DataFrame()
 
     prices = data.get("prices", [])
-    df = pd.DataFrame(prices, columns=["timestamp_ms", "price"])
-    df["date"] = pd.to_datetime(df["timestamp_ms"], unit="ms").dt.date
-    df = df[["date", "price"]]
-    return df
+    df = pd.DataFrame(prices, columns=["timestamp", "price"])
+
+    if df.empty:
+        return df
+
+    df["date"] = pd.to_datetime(df["timestamp"], unit="ms")
+    return df[["date", "price"]]
 
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
@@ -84,191 +89,144 @@ st.sidebar.title("⚙️ Controls")
 currency = st.sidebar.selectbox("Currency", ["USD", "EUR", "INR"])
 sym = CURRENCY_SYMBOLS[currency]
 
-search_query = st.sidebar.text_input("Filter coins by name", placeholder="e.g. Bitcoin")
+search_query = st.sidebar.text_input("Search coin")
 
-refresh_clicked = st.sidebar.button("🔄 Refresh Now")
-if refresh_clicked:
+if st.sidebar.button("🔄 Refresh Now"):
     st.cache_data.clear()
     st.rerun()
-
-# Auto-refresh countdown
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Auto-refresh every 60 s**")
-countdown_placeholder = st.sidebar.empty()
 
 # ─── Header ──────────────────────────────────────────────────────────────────
 
 st.title("💰 Crypto Place Dashboard")
-st.caption(
-    f"Currency: **{currency}** ({sym})  •  "
-    f"Last fetched: **{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}**"
-)
+st.caption(f"{currency} ({sym}) • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 st.markdown("---")
 
-# ─── Fetch data ──────────────────────────────────────────────────────────────
+# ─── Fetch Data ──────────────────────────────────────────────────────────────
 
 df_raw = fetch_top_coins(currency)
 
 if df_raw.empty:
-    st.warning("No data available. Check your internet connection and try refreshing.")
+    st.warning("No data available")
     st.stop()
 
-# ─── Apply search filter ──────────────────────────────────────────────────────
+# ─── Filter ──────────────────────────────────────────────────────────────────
 
-if search_query.strip():
-    mask = df_raw["Coin Name"].str.contains(search_query.strip(), case=False, na=False)
-    df_filtered = df_raw[mask].copy()
+if search_query:
+    df_filtered = df_raw[df_raw["Coin Name"].str.contains(search_query, case=False)]
 else:
-    df_filtered = df_raw.copy()
+    df_filtered = df_raw
 
 if df_filtered.empty:
-    st.info(f"No coins matching '{search_query}'. Showing full list.")
-    df_filtered = df_raw.copy()
+    st.info("No results found, showing all coins")
+    df_filtered = df_raw
 
-# ─── Summary stats row ───────────────────────────────────────────────────────
+# ─── Summary Metrics ─────────────────────────────────────────────────────────
 
-highest_price_row = df_raw.loc[df_raw["current_price"].idxmax()]
-lowest_change_row = df_raw.loc[df_raw["price_change_24h"].idxmin()]
-highest_mcap_row  = df_raw.loc[df_raw["market_cap"].idxmax()]
+def safe_row(df, column, func):
+    if df[column].isna().all():
+        return df.iloc[0]
+    return df.loc[func(df[column])]
+
+highest_price_row = safe_row(df_raw, "current_price", lambda x: x.idxmax())
+lowest_change_row = safe_row(df_raw, "price_change_24h", lambda x: x.idxmin())
+highest_mcap_row  = safe_row(df_raw, "market_cap", lambda x: x.idxmax())
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    price_val = np.round(highest_price_row["current_price"], 2)
+    val = highest_price_row["current_price"]
     st.metric(
-        label=f"💎 Highest Priced — {highest_price_row['Coin Name']}",
-        value=f"{sym}{price_val:,.2f}",
+        f"💎 Highest Price — {highest_price_row['Coin Name']}",
+        f"{sym}{val:,.2f}" if np.isfinite(val) else "—"
     )
 
 with col2:
-    change_val = np.round(lowest_change_row["price_change_24h"], 2)
+    val = lowest_change_row["price_change_24h"]
     st.metric(
-        label=f"📉 Lowest 24h Change — {lowest_change_row['Coin Name']}",
-        value=f"{change_val:+.2f}%",
-        delta=f"{change_val:.2f}%",
+        f"📉 Lowest 24h — {lowest_change_row['Coin Name']}",
+        f"{val:+.2f}%" if np.isfinite(val) else "—",
+        delta=f"{val:.2f}%" if np.isfinite(val) else None,
         delta_color="inverse",
     )
 
 with col3:
-    mcap_val = highest_mcap_row["market_cap"]
-    # Format market cap in billions/trillions for readability
-    if mcap_val >= 1e12:
-        mcap_str = f"{sym}{np.round(mcap_val / 1e12, 2):.2f}T"
+    val = highest_mcap_row["market_cap"]
+    if val >= 1e12:
+        mcap = f"{sym}{val/1e12:.2f}T"
     else:
-        mcap_str = f"{sym}{np.round(mcap_val / 1e9, 2):.2f}B"
+        mcap = f"{sym}{val/1e9:.2f}B"
+
     st.metric(
-        label=f"🏆 Highest Market Cap — {highest_mcap_row['Coin Name']}",
-        value=mcap_str,
+        f"🏆 Market Cap — {highest_mcap_row['Coin Name']}",
+        mcap if np.isfinite(val) else "—"
     )
 
 st.markdown("---")
 
-# ─── Top 10 Coins Table ───────────────────────────────────────────────────────
+# ─── Table ───────────────────────────────────────────────────────────────────
 
-st.subheader("📊 Top 10 Coins by Market Cap")
+st.subheader("📊 Top 10 Coins")
 
-# Build display dataframe with formatted columns
-df_display = df_filtered[["Rank", "Coin Name", "Symbol", "current_price", "price_change_24h", "market_cap"]].copy()
-df_display["Current Price"] = df_display["current_price"].apply(
-    lambda p: f"{sym}{np.round(p, 2):,.2f}"
+def safe_format(val, fmt):
+    return fmt(val) if np.isfinite(val) else "—"
+
+df_display = df_filtered.copy()
+
+df_display["Price"] = df_display["current_price"].apply(
+    lambda x: safe_format(x, lambda v: f"{sym}{v:,.2f}")
 )
-df_display["24h Change %"] = df_display["price_change_24h"].apply(
-    lambda c: f"{np.round(c, 2):+.2f}%"
+
+df_display["Change"] = df_display["price_change_24h"].apply(
+    lambda x: safe_format(x, lambda v: f"{v:+.2f}%")
 )
+
 df_display["Market Cap"] = df_display["market_cap"].apply(
-    lambda m: f"{sym}{m:,.0f}"
+    lambda x: safe_format(x, lambda v: f"{sym}{v:,.0f}")
 )
-df_display = df_display[["Rank", "Coin Name", "Symbol", "Current Price", "24h Change %", "Market Cap"]]
 
-# Color-code 24h Change column using pandas Styler
-def color_change(val: str):
-    """Return CSS color based on whether change is positive or negative."""
+df_display = df_display[["Rank", "Coin Name", "Symbol", "Price", "Change", "Market Cap"]]
+
+def color_change(val):
     try:
-        numeric = float(val.replace("%", "").replace("+", ""))
-        color = "#00c853" if numeric >= 0 else "#d50000"
-    except ValueError:
-        color = "white"
-    return f"color: {color}; font-weight: bold"
+        num = float(val.replace("%", "").replace("+", ""))
+        return f"color: {'green' if num >= 0 else 'red'}; font-weight:bold"
+    except:
+        return ""
 
-styled = df_display.style.map(color_change, subset=["24h Change %"])
-
-st.dataframe(styled, use_container_width=True, hide_index=True)
+st.dataframe(df_display.style.map(color_change, subset=["Change"]), use_container_width=True)
 
 st.markdown("---")
 
-# ─── Price Chart ─────────────────────────────────────────────────────────────
+# ─── Chart ───────────────────────────────────────────────────────────────────
 
-st.subheader("📈 10-Day Price History")
+st.subheader("📈 10-Day Price Chart")
 
-coin_options = df_raw[["Coin Name", "id"]].set_index("Coin Name")["id"].to_dict()
-selected_coin_name = st.selectbox("Select a coin", list(coin_options.keys()))
-selected_coin_id   = coin_options[selected_coin_name]
+coin_map = df_raw.set_index("Coin Name")["id"].to_dict()
+coin_name = st.selectbox("Select Coin", list(coin_map.keys()))
+coin_id = coin_map[coin_name]
 
-df_history = fetch_price_history(selected_coin_id, currency)
+df_hist = fetch_price_history(coin_id, currency)
 
-if not df_history.empty:
+if not df_hist.empty:
     sns.set_style("darkgrid")
     fig, ax = plt.subplots(figsize=(12, 4))
-    fig.patch.set_facecolor("#0e1117")
-    ax.set_facecolor("#0e1117")
 
-    # Plot line + shaded area under the curve
-    dates  = pd.to_datetime(df_history["date"])
-    prices = df_history["price"].values
+    dates = df_hist["date"]
+    prices = df_hist["price"]
 
-    sns.lineplot(x=dates, y=prices, ax=ax, color="#00c853", linewidth=2.5)
-    ax.fill_between(dates, prices, alpha=0.15, color="#00c853")
+    ax.plot(dates, prices)
+    ax.fill_between(dates, prices, alpha=0.2)
 
-    # Format axes
+    ax.set_title(f"{coin_name} Price")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(f"Price ({sym})")
+
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
-    plt.xticks(rotation=45, color="white", fontsize=9)
-    plt.yticks(color="white", fontsize=9)
-    ax.set_xlabel("Date", color="white", fontsize=11)
-    ax.set_ylabel(f"Price ({sym})", color="white", fontsize=11)
-    ax.set_title(
-        f"{selected_coin_name} — 10-Day Price ({currency})",
-        color="white",
-        fontsize=14,
-        pad=12,
-    )
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_edgecolor("#444")
+    plt.xticks(rotation=45)
 
-    # Annotate min/max price points
-    min_idx = np.argmin(prices)
-    max_idx = np.argmax(prices)
-    ax.annotate(
-        f"Low\n{sym}{np.round(prices[min_idx], 2):,.2f}",
-        xy=(dates.iloc[min_idx], prices[min_idx]),
-        xytext=(10, 15), textcoords="offset points",
-        color="#ff5252", fontsize=8,
-        arrowprops=dict(arrowstyle="->", color="#ff5252", lw=1),
-    )
-    ax.annotate(
-        f"High\n{sym}{np.round(prices[max_idx], 2):,.2f}",
-        xy=(dates.iloc[max_idx], prices[max_idx]),
-        xytext=(10, -25), textcoords="offset points",
-        color="#69f0ae", fontsize=8,
-        arrowprops=dict(arrowstyle="->", color="#69f0ae", lw=1),
-    )
-
-    plt.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
+
 else:
-    st.warning("Could not load price history for this coin.")
-
-st.markdown("---")
-
-# ─── Auto-refresh countdown ───────────────────────────────────────────────────
-# Count down 60 s then rerun the entire script to pull fresh data.
-
-for remaining in range(60, 0, -1):
-    countdown_placeholder.info(f"Next refresh in **{remaining}s**")
-    time.sleep(1)
-
-st.cache_data.clear()
-st.rerun()
+    st.warning("Chart data not available")
